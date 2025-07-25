@@ -6,6 +6,8 @@ def lambda_handler(event, context):
     ec2 = boto3.client('ec2')
     regions_response = ec2.describe_regions()
     regions = [region['RegionName'] for region in regions_response['Regions']]
+    # For testing, you can specify a single region
+    # regions = ['us-west-2']
 
     checked_regions = []
     regions_with_no_encryption = set()
@@ -14,8 +16,13 @@ def lambda_handler(event, context):
 
     def list_auto_scaling_groups(autoscaling_client):
         try:
-            response = autoscaling_client.describe_auto_scaling_groups()
-            return response['AutoScalingGroups']
+            paginator = autoscaling_client.get_paginator('describe_auto_scaling_groups')
+            page_iterator = paginator.paginate()
+
+            all_auto_scaling_groups = []
+            for page in page_iterator:
+                all_auto_scaling_groups.extend(page['AutoScalingGroups'])
+            return all_auto_scaling_groups
         except Exception as e:
             errors.append(f"Error listing ASGs: {str(e)}")
             return []
@@ -28,32 +35,36 @@ def lambda_handler(event, context):
             )
             for version in response['LaunchTemplateVersions']:
                 for block_device in version['LaunchTemplateData']['BlockDeviceMappings']:
+                    if 'Ebs' not in block_device:
+                        errors.append(f"Code 404: EBS device not found in launch template {launch_template.get('LaunchTemplateName')}")
+                        return False
                     if not block_device['Ebs'].get('Encrypted', False):
                         return False
             return True
         except Exception as e:
-            errors.append(f"Error checking encryption for {launch_template.get('LaunchTemplateName')}: {str(e)}")
+            errors.append(f"Code 505x: Failed to check encryption for {launch_template.get('LaunchTemplateName')}: {str(e)}")
             return True  # Assume encrypted if there's an error to avoid false positives
 
     def update_launch_template(ec2_client, launch_template, region):
         try:
-            # Retrieve the current launch template version details
             response = ec2_client.describe_launch_template_versions(
                 LaunchTemplateName=launch_template.get('LaunchTemplateName'),
                 Versions=[launch_template.get('Version')]
             )
             current_version = response['LaunchTemplateVersions'][0]['LaunchTemplateData']
-
-            # Track block devices that are updated
             updated_block_devices = []
 
-            # Update all block device mappings to have encryption enabled
             for block_device in current_version['BlockDeviceMappings']:
+                if 'Ebs' not in block_device:
+                    errors.append(f"Code 504x: Device type {block_device['DeviceName']} is not coded to enable encryption. Please contact Sys Arch.")
+                    continue
                 if not block_device['Ebs'].get('Encrypted', False):
-                    block_device['Ebs']['Encrypted'] = True
-                    updated_block_devices.append(block_device['DeviceName'])
+                    try:
+                        block_device['Ebs']['Encrypted'] = True
+                        updated_block_devices.append(block_device['DeviceName'])
+                    except Exception as e:
+                        errors.append(f"Code 505x: Failed to enable encryption for device {block_device['DeviceName']} in {launch_template.get('LaunchTemplateName')}: {str(e)}")
 
-            # Create a new launch template version with updated encryption settings
             response = ec2_client.create_launch_template_version(
                 LaunchTemplateName=launch_template.get('LaunchTemplateName'),
                 SourceVersion=launch_template.get('Version'),
@@ -61,7 +72,6 @@ def lambda_handler(event, context):
             )
             new_version = response['LaunchTemplateVersion']['VersionNumber']
 
-            # Set the new version as the default
             ec2_client.modify_launch_template(
                 LaunchTemplateName=launch_template.get('LaunchTemplateName'),
                 DefaultVersion=str(new_version)
@@ -89,7 +99,11 @@ def lambda_handler(event, context):
 
     # Prepare the response
     if errors:
-        status_code = 500
+        # Determine the appropriate status code based on the type of errors
+        if any("Code 404" in error or "Code 504x" in error for error in errors):
+            status_code = 400  # Client-side error
+        else:
+            status_code = 500  # Server-side error
         message = f"Errors occurred: {errors}"
     else:
         status_code = 200
