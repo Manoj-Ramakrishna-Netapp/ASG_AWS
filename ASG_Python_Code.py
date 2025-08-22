@@ -2,10 +2,11 @@ import boto3
 import json
 
 def main():
+    # Dynamically retrieve the list of available regions
     ec2 = boto3.client('ec2')
     regions_response = ec2.describe_regions()
     regions = [region['RegionName'] for region in regions_response['Regions']]
-    #regions = ['us-west-2']
+    #regions = ['us-west-2']  # For testing, you can specify a single region
     checked_regions = []
     regions_with_no_encryption = set()
     updated_asgs = []
