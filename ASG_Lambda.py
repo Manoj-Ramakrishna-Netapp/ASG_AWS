@@ -99,11 +99,7 @@ def lambda_handler(event, context):
 
     # Prepare the response
     if errors:
-        # Determine the appropriate status code based on the type of errors
-        if any("Code 404" in error or "Code 504x" in error for error in errors):
-            status_code = 400  # Client-side error
-        else:
-            status_code = 500  # Server-side error
+        status_code = 500
         message = f"Errors occurred: {errors}"
     else:
         status_code = 200
